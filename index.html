@@ -53,6 +53,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino San
 .camera-status.active { background: #dcfce7; color: #15803d; }
 .camera-status.error { background: #fef2f2; color: #b91c1c; }
 .camera-status.loading { background: #fef9c3; color: #854d0e; }
+.camera-toggle-btn { background: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px 16px; font-size: 14px; color: #334155; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+.camera-toggle-btn:active { background: #e2e8f0; }
 /* Process selection */
 .process-select { padding: 16px 24px; flex: 1; display: flex; flex-direction: column; }
 .process-select .greeting { text-align: center; margin-bottom: 20px; }
@@ -167,8 +169,8 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 
 // ==================== テストユーザー 2名 ====================
 const MOCK_EMPLOYEES = [
-  { employee_id: "emp_test_001", employee_name: "テスト 太郎", qr_code: "TAIYO-TEST-001", factory_id: "f_001", role: "worker" },
-  { employee_id: "emp_test_002", employee_name: "テスト 花子", qr_code: "TAIYO-TEST-002", factory_id: "f_001", role: "manager" },
+  { employee_id: "emp_test_001", employee_name: "テスト １", qr_code: "TAIYO-TEST-001", factory_id: "f_001", role: "worker" },
+  { employee_id: "emp_test_002", employee_name: "テスト ２", qr_code: "TAIYO-TEST-002", factory_id: "f_001", role: "manager" },
 ];
 
 const FACTORIES = [
@@ -270,15 +272,22 @@ const useQRCamera = (onDetect, enabled) => {
   const streamRef = useRef(null);
   const animRef = useRef(null);
   const [cameraStatus, setCameraStatus] = useState("idle"); // idle, loading, active, error
+  const [facingMode, setFacingMode] = useState("user"); // "user"=インカメラ, "environment"=外カメラ
   const lastDetectedRef = useRef(null);
   const cooldownRef = useRef(false);
 
-  const startCamera = useCallback(async () => {
-    if (!enabled) return;
+  const startCamera = useCallback(async (facing) => {
+    const mode = facing || facingMode;
     setCameraStatus("loading");
+    // 既存ストリームを停止
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+    if (animRef.current) cancelAnimationFrame(animRef.current);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment", width: { ideal: 640 }, height: { ideal: 480 } }
+        video: { facingMode: mode, width: { ideal: 640 }, height: { ideal: 480 } }
       });
       streamRef.current = stream;
       if (videoRef.current) {
@@ -292,7 +301,15 @@ const useQRCamera = (onDetect, enabled) => {
       console.error("Camera error:", err);
       setCameraStatus("error");
     }
-  }, [enabled]);
+  }, [facingMode]);
+
+  const toggleCamera = useCallback(() => {
+    const newMode = facingMode === "user" ? "environment" : "user";
+    setFacingMode(newMode);
+    if (enabled) {
+      startCamera(newMode);
+    }
+  }, [facingMode, enabled, startCamera]);
 
   const stopCamera = useCallback(() => {
     if (animRef.current) cancelAnimationFrame(animRef.current);
@@ -338,7 +355,7 @@ const useQRCamera = (onDetect, enabled) => {
     return () => stopCamera();
   }, [enabled]);
 
-  return { videoRef, canvasRef, cameraStatus, startCamera, stopCamera };
+  return { videoRef, canvasRef, cameraStatus, startCamera, stopCamera, toggleCamera, facingMode };
 };
 
 // ==================== Stamp Screen (QR Code - Live Camera) ====================
@@ -359,7 +376,7 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
     }
   }, [employees]);
 
-  const { videoRef, canvasRef, cameraStatus } = useQRCamera(handleQRDetect, cameraEnabled && phase === "idle");
+  const { videoRef, canvasRef, cameraStatus, toggleCamera, facingMode } = useQRCamera(handleQRDetect, cameraEnabled && phase === "idle");
 
   const recent = useMemo(() =>
     [...stamps].sort((a,b) => new Date(b.stamp_time) - new Date(a.stamp_time)).slice(0,6),
@@ -427,6 +444,11 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
         React.createElement("div", {className:"scan-line"}))),
     React.createElement("div", {className:"camera-label"}, "QRコードをカメラにかざしてください"),
     React.createElement("div", {className:"camera-sub"}, "帽子のプラカードをカメラに向けてください"),
+    React.createElement("div", {style:{display:"flex",justifyContent:"center",gap:12,margin:"8px 0"}},
+      React.createElement("button", {onClick: toggleCamera, className:"camera-toggle-btn"},
+        facingMode === "user" ? "\uD83D\uDD04 外カメラに切替" : "\uD83D\uDD04 インカメラに切替"),
+      React.createElement("span", {style:{fontSize:12,color:"#888",alignSelf:"center"}},
+        facingMode === "user" ? "現在: インカメラ（前面）" : "現在: 外カメラ（背面）")),
     React.createElement("div", {className:`camera-status ${cameraStatus === "active" ? "active" : cameraStatus === "error" ? "error" : "loading"}`},
       cameraStatus === "active" ? "カメラ起動中 - スキャン待機" :
       cameraStatus === "error" ? "カメラ起動失敗（HTTPS環境が必要）" :
@@ -670,19 +692,27 @@ const ManagerScreen = ({stamps, setStamps, employees, processes}) => {
 
 // ==================== QR Print Screen ====================
 const QRPrintScreen = ({employees}) => {
-  const canvasRefs = useRef({});
+  const [qrImages, setQrImages] = useState({});
 
   useEffect(() => {
-    employees.forEach(emp => {
-      const canvas = canvasRefs.current[emp.employee_id];
-      if (canvas && typeof QRCode !== "undefined") {
-        QRCode.toCanvas(canvas, emp.qr_code, {
+    const generate = () => {
+      const qrLib = typeof QRCode !== "undefined" ? QRCode : (typeof window.QRCode !== "undefined" ? window.QRCode : null);
+      if (!qrLib || !qrLib.toDataURL) {
+        // ライブラリ未ロード時はリトライ
+        setTimeout(generate, 300);
+        return;
+      }
+      employees.forEach(emp => {
+        qrLib.toDataURL(emp.qr_code, {
           width: 200,
           margin: 2,
           color: { dark: "#1e293b", light: "#ffffff" }
-        });
-      }
-    });
+        }).then(url => {
+          setQrImages(prev => ({...prev, [emp.employee_id]: url}));
+        }).catch(err => console.error("QR generation error:", err));
+      });
+    };
+    generate();
   }, [employees]);
 
   return React.createElement("div", {className:"screen"},
@@ -697,10 +727,9 @@ const QRPrintScreen = ({employees}) => {
         React.createElement("div", {key: emp.employee_id, className:"qr-card"},
           React.createElement("div", {className:"qr-name"}, emp.employee_name),
           React.createElement("div", {className:"qr-code-img"},
-            React.createElement("canvas", {
-              ref: el => { canvasRefs.current[emp.employee_id] = el; },
-              style: {display: "block", margin: "0 auto"}
-            })),
+            qrImages[emp.employee_id]
+              ? React.createElement("img", {src: qrImages[emp.employee_id], alt: `QR: ${emp.qr_code}`, style: {display:"block", margin:"0 auto", width:200, height:200}})
+              : React.createElement("div", {style:{width:200,height:200,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",background:"#f8fafc",borderRadius:8,color:"#94a3b8"}}, "生成中...")),
           React.createElement("div", {className:"qr-value"}, `QR値: ${emp.qr_code}`),
           React.createElement("div", {className:"qr-note"}, "※ このQRコードを帽子のプラカードに使用します"))
       ))
