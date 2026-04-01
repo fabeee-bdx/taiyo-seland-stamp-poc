@@ -8,7 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+<!-- QRコード表示は外部API (api.qrserver.com) を使用 -->
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino Sans', sans-serif; background: #f1f5f9; }
@@ -111,6 +111,8 @@ tr:hover { background: #f8fafc; }
 .btn-primary { background: #1e293b; color: #fff; }
 .btn-green { background: #16a34a; color: #fff; }
 .btn-green:disabled { background: #cbd5e1; cursor: not-allowed; }
+.btn-csv { background: #2563eb; color: #fff; font-size: 12px; padding: 6px 12px; }
+.btn-csv:active { background: #1d4ed8; }
 .btn-link { background: none; border: none; color: #2563eb; font-size: 12px; cursor: pointer; padding: 0; }
 .btn-link:hover { text-decoration: underline; }
 .alert-box { background: #fefce8; border: 1px solid #fde68a; border-radius: 8px; padding: 12px; margin-bottom: 16px; }
@@ -663,7 +665,9 @@ const ManagerScreen = ({stamps, setStamps, employees, processes}) => {
           React.createElement("select",{value:filterPr,onChange:e=>setFilterPr(e.target.value)},
             React.createElement("option",{value:""},"すべて"),
             processes.map(p=>React.createElement("option",{key:p.process_id,value:p.process_id},p.process_name)))),
-        React.createElement("button",{className:"btn btn-green",disabled:allConf,onClick:confirmAll},"全件確認済み")),
+        React.createElement("button",{className:"btn btn-green",disabled:allConf,onClick:confirmAll},"全件確認済み"),
+        React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_${selDate}.csv`)},"\u2B07 CSV出力"),
+        React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_全件_${today}.csv`)},"\u2B07 全日CSV")),
       alerts.length>0&&React.createElement("div",{className:"alert-box"},
         React.createElement("div",{className:"alert-title"},`要確認: ${alerts.length}件`),
         alerts.slice(0,5).map((a,i)=>React.createElement("div",{key:i,className:"alert-item"},
@@ -692,28 +696,8 @@ const ManagerScreen = ({stamps, setStamps, employees, processes}) => {
 
 // ==================== QR Print Screen ====================
 const QRPrintScreen = ({employees}) => {
-  const [qrImages, setQrImages] = useState({});
-
-  useEffect(() => {
-    const generate = () => {
-      const qrLib = typeof QRCode !== "undefined" ? QRCode : (typeof window.QRCode !== "undefined" ? window.QRCode : null);
-      if (!qrLib || !qrLib.toDataURL) {
-        // ライブラリ未ロード時はリトライ
-        setTimeout(generate, 300);
-        return;
-      }
-      employees.forEach(emp => {
-        qrLib.toDataURL(emp.qr_code, {
-          width: 200,
-          margin: 2,
-          color: { dark: "#1e293b", light: "#ffffff" }
-        }).then(url => {
-          setQrImages(prev => ({...prev, [emp.employee_id]: url}));
-        }).catch(err => console.error("QR generation error:", err));
-      });
-    };
-    generate();
-  }, [employees]);
+  // QRコード画像を外部API経由で取得（JSライブラリ不要で確実に表示）
+  const getQRUrl = (text) => `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(text)}&color=1e293b&bgcolor=ffffff&margin=8`;
 
   return React.createElement("div", {className:"screen"},
     React.createElement("div", {className:"header"}, React.createElement("div", {className:"header-title"}, "QRコード印刷")),
@@ -727,9 +711,16 @@ const QRPrintScreen = ({employees}) => {
         React.createElement("div", {key: emp.employee_id, className:"qr-card"},
           React.createElement("div", {className:"qr-name"}, emp.employee_name),
           React.createElement("div", {className:"qr-code-img"},
-            qrImages[emp.employee_id]
-              ? React.createElement("img", {src: qrImages[emp.employee_id], alt: `QR: ${emp.qr_code}`, style: {display:"block", margin:"0 auto", width:200, height:200}})
-              : React.createElement("div", {style:{width:200,height:200,display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto",background:"#f8fafc",borderRadius:8,color:"#94a3b8"}}, "生成中...")),
+            React.createElement("img", {
+              src: getQRUrl(emp.qr_code),
+              alt: `QR: ${emp.qr_code}`,
+              style: {display:"block", margin:"0 auto", width:200, height:200},
+              onError: (e) => { e.target.style.display="none"; e.target.nextSibling && (e.target.nextSibling.style.display="flex"); },
+            }),
+            React.createElement("div", {style:{width:200,height:200,display:"none",alignItems:"center",justifyContent:"center",margin:"0 auto",background:"#f8fafc",borderRadius:8,color:"#94a3b8",flexDirection:"column",fontSize:13}},
+              "QR生成に失敗しました",
+              React.createElement("br"),
+              `値: ${emp.qr_code}`)),
           React.createElement("div", {className:"qr-value"}, `QR値: ${emp.qr_code}`),
           React.createElement("div", {className:"qr-note"}, "※ このQRコードを帽子のプラカードに使用します"))
       ))
@@ -737,7 +728,7 @@ const QRPrintScreen = ({employees}) => {
 };
 
 // ==================== Settings Screen ====================
-const SettingsScreen = ({processes, employees, currentFactory, setCurrentFactory}) => {
+const SettingsScreen = ({processes, employees, currentFactory, setCurrentFactory, stamps, setStamps}) => {
   const factoryProcesses = processes.filter(p => p.factory_id === currentFactory.factory_id);
   return React.createElement("div",{className:"screen"},
     React.createElement("div",{className:"header"},React.createElement("div",{className:"header-title"},"設定")),
@@ -782,19 +773,65 @@ const SettingsScreen = ({processes, employees, currentFactory, setCurrentFactory
             React.createElement("td",null,React.createElement("span",{className:`role-badge ${e.role}`},e.role==="manager"?"管理者":"作業者"))))))),
       React.createElement("div",{className:"sys-info"},
         React.createElement("div",{className:"si-title"},"システム情報"),
-        React.createElement("div",null,"バージョン: 0.3.0 (PoC - カメラ実動作版)"),
+        React.createElement("div",null,"バージョン: 0.4.0 (PoC - カメラ実動作版 + データ永続化)"),
         React.createElement("div",null,"読取: getUserMedia API + jsQR（実カメラ）"),
-        React.createElement("div",null,"データ保存: メモリ内（ページ更新でリセット）"),
-        React.createElement("div",null,"注意: HTTPS環境またはlocalhostでカメラが動作します")))
+        React.createElement("div",null,"データ保存: localStorage（端末内に保存・ページ更新OK）"),
+        React.createElement("div",null,"CSV出力: 管理者画面から日別 or 全件出力可能"),
+        React.createElement("div",null,"注意: HTTPS環境またはlocalhostでカメラが動作します"),
+        React.createElement("div",{style:{marginTop:8}}, `蓄積データ: ${stamps.length}件`)),
+      React.createElement("div",{className:"settings-section"},
+        React.createElement("h3",null,"データ管理"),
+        React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
+          React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_全件_${today}.csv`),disabled:stamps.length===0},`\u2B07 全データCSV出力（${stamps.length}件）`),
+          React.createElement("button",{className:"btn",style:{background:"#dc2626",color:"#fff",fontSize:12,padding:"6px 12px"},
+            onClick:()=>{if(window.confirm(`全${stamps.length}件の打刻データを削除しますか？\n（事前にCSV出力をお勧めします）`)){setStamps([]);localStorage.removeItem(STORAGE_KEY);}}},"全データクリア")))
   );
 };
 
 // ==================== Main App ====================
+// ==================== CSV Export ====================
+const exportCSV = (stamps, filename) => {
+  const header = "打刻ID,QRコード,従業員ID,従業員名,工程ID,工程名,打刻種別,打刻日時,修正有無,修正理由,修正者,修正日時,確認済,確認者,確認日時";
+  const rows = stamps.map(s => [
+    s.stamp_id, s.qr_code, s.employee_id, s.employee_name, s.process_id,
+    prName(s.process_id), s.stamp_type === "start" ? "開始" : "終了",
+    s.stamp_time, s.is_modified ? "あり" : "なし", s.modify_reason || "",
+    s.modified_by || "", s.modified_at || "", s.confirmed ? "済" : "未",
+    s.confirmed_by || "", s.confirmed_at || ""
+  ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(","));
+  const bom = "\uFEFF";
+  const csv = bom + header + "\n" + rows.join("\n");
+  const blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || `工数ログ_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// ==================== localStorage ====================
+const STORAGE_KEY = "taiyo_seland_stamps";
+const loadStamps = () => {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch(e) { return []; }
+};
+const saveStamps = (stamps) => {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stamps)); } catch(e) {}
+};
+
 const App = () => {
-  const [stamps, setStamps] = useState([]);
+  const [stamps, setStamps] = useState(() => loadStamps());
   const [tab, setTab] = useState("stamp");
   const [editing, setEditing] = useState(null);
   const [currentFactory, setCurrentFactory] = useState(FACTORIES[0]);
+
+  // stamps変更時にlocalStorageへ保存
+  useEffect(() => { saveStamps(stamps); }, [stamps]);
 
   const tabs = [
     {id:"stamp",label:"打刻",icon:"\uD83D\uDCF7"},
@@ -811,7 +848,7 @@ const App = () => {
       case "history": return React.createElement(HistoryScreen,{stamps,employees:MOCK_EMPLOYEES,processes:MOCK_PROCESSES,onEdit:s=>setEditing(s)});
       case "manager": return React.createElement(ManagerScreen,{stamps,setStamps,employees:MOCK_EMPLOYEES,processes:MOCK_PROCESSES});
       case "qrprint": return React.createElement(QRPrintScreen,{employees:MOCK_EMPLOYEES});
-      case "settings": return React.createElement(SettingsScreen,{processes:MOCK_PROCESSES,employees:MOCK_EMPLOYEES,currentFactory,setCurrentFactory});
+      case "settings": return React.createElement(SettingsScreen,{processes:MOCK_PROCESSES,employees:MOCK_EMPLOYEES,currentFactory,setCurrentFactory,stamps,setStamps});
     }
   };
 
