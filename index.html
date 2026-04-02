@@ -146,17 +146,22 @@ tr:hover { background: #f8fafc; }
 .qr-print-page { padding: 24px; }
 .qr-print-page h2 { font-size: 18px; margin-bottom: 8px; }
 .qr-print-page .desc { font-size: 13px; color: #64748b; margin-bottom: 24px; }
-.qr-card { border: 2px solid #1e293b; border-radius: 12px; padding: 24px; margin-bottom: 20px; text-align: center; page-break-inside: avoid; }
-.qr-card .qr-name { font-size: 22px; font-weight: 700; margin-bottom: 12px; }
-.qr-card .qr-code-img { margin: 0 auto 12px; }
-.qr-card .qr-value { font-family: monospace; font-size: 14px; color: #64748b; margin-top: 8px; }
-.qr-card .qr-note { font-size: 11px; color: #94a3b8; margin-top: 4px; }
+.qr-card { border: 2px solid #1e293b; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; display: flex; align-items: center; gap: 12px; width: fit-content; }
+.qr-card .qr-name { font-size: 16px; font-weight: 700; min-width: 80px; text-align: left; }
+.qr-card .qr-code-img { flex-shrink: 0; }
+.qr-card .qr-value { font-family: monospace; font-size: 11px; color: #64748b; }
 .print-btn { display: block; margin: 0 auto 24px; padding: 12px 32px; background: #8b5cf6; color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
 .print-btn:hover { background: #7c3aed; }
 @media print {
   .bottom-nav, .sim-area, .print-btn, .no-print { display: none !important; }
-  .app-shell { border: none; height: auto; }
-  .qr-card { break-inside: avoid; }
+  .app-shell { border: none; height: auto; max-width: none; overflow: visible; }
+  .screen { overflow: visible; }
+  .qr-print-page { padding: 0; }
+  .qr-cards-grid { display: flex; flex-wrap: wrap; gap: 2mm; }
+  .qr-card { width: 51mm; height: 26mm; border: 0.5pt solid #000; border-radius: 2mm; padding: 2mm 3mm; margin: 0; display: flex; align-items: center; gap: 3mm; box-sizing: border-box; break-inside: avoid; }
+  .qr-card .qr-name { font-size: 10pt; font-weight: 700; min-width: auto; flex: 1; }
+  .qr-card .qr-code-img img { width: 20mm !important; height: 20mm !important; }
+  .qr-card .qr-value { display: none; }
 }
 /* Camera toggle */
 .camera-toggle { margin-top: 8px; padding: 6px 16px; background: #8b5cf6; color: #fff; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; }
@@ -172,7 +177,10 @@ const { useState, useEffect, useCallback, useMemo, useRef } = React;
 // ==================== テストユーザー 2名 ====================
 const MOCK_EMPLOYEES = [
   { employee_id: "emp_test_001", employee_name: "テスト １", qr_code: "TAIYO-TEST-001", factory_id: "f_001", role: "worker" },
-  { employee_id: "emp_test_002", employee_name: "テスト ２", qr_code: "TAIYO-TEST-002", factory_id: "f_001", role: "manager" },
+  { employee_id: "emp_test_002", employee_name: "テスト ２", qr_code: "TAIYO-TEST-002", factory_id: "f_001", role: "worker" },
+  { employee_id: "emp_test_003", employee_name: "テスト ３", qr_code: "TAIYO-TEST-003", factory_id: "f_001", role: "worker" },
+  { employee_id: "emp_test_004", employee_name: "テスト ４", qr_code: "TAIYO-TEST-004", factory_id: "f_001", role: "worker" },
+  { employee_id: "emp_test_005", employee_name: "テスト ５", qr_code: "TAIYO-TEST-005", factory_id: "f_001", role: "manager" },
 ];
 
 const FACTORIES = [
@@ -739,26 +747,22 @@ const QRPrintScreen = ({employees}) => {
     React.createElement("div", {className:"qr-print-page"},
       React.createElement("button", {className:"print-btn no-print", onClick: () => window.print()}, "このページを印刷する"),
       React.createElement("div", {className:"desc no-print"},
-        "以下のQRコードを印刷し、ラミネート加工後に帽子にクリップで装着してください。",
+        "以下のQRコードを印刷し、切り取ってご使用ください。",
         React.createElement("br"),
-        "A4用紙に印刷して切り取ると、ちょうどよいサイズになります。"),
-      employees.map(emp =>
-        React.createElement("div", {key: emp.employee_id, className:"qr-card"},
-          React.createElement("div", {className:"qr-name"}, emp.employee_name),
-          React.createElement("div", {className:"qr-code-img"},
-            React.createElement("img", {
-              src: getQRUrl(emp.qr_code),
-              alt: `QR: ${emp.qr_code}`,
-              style: {display:"block", margin:"0 auto", width:200, height:200},
-              onError: (e) => { e.target.style.display="none"; e.target.nextSibling && (e.target.nextSibling.style.display="flex"); },
-            }),
-            React.createElement("div", {style:{width:200,height:200,display:"none",alignItems:"center",justifyContent:"center",margin:"0 auto",background:"#f8fafc",borderRadius:8,color:"#94a3b8",flexDirection:"column",fontSize:13}},
-              "QR生成に失敗しました",
-              React.createElement("br"),
-              `値: ${emp.qr_code}`)),
-          React.createElement("div", {className:"qr-value"}, `QR値: ${emp.qr_code}`),
-          React.createElement("div", {className:"qr-note"}, "※ このQRコードを帽子のプラカードに使用します"))
-      ))
+        "印刷サイズ: 51mm × 26mm（A4用紙に複数枚印刷されます）"),
+      React.createElement("div", {className:"qr-cards-grid"},
+        employees.map(emp =>
+          React.createElement("div", {key: emp.employee_id, className:"qr-card"},
+            React.createElement("div", {className:"qr-name"}, emp.employee_name),
+            React.createElement("div", {className:"qr-code-img"},
+              React.createElement("img", {
+                src: getQRUrl(emp.qr_code),
+                alt: `QR: ${emp.qr_code}`,
+                style: {display:"block", width:80, height:80},
+                onError: (e) => { e.target.style.display="none"; },
+              })),
+            React.createElement("div", {className:"qr-value no-print"}, `${emp.qr_code}`))
+        )))
   );
 };
 
