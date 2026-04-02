@@ -157,12 +157,15 @@ tr:hover { background: #f8fafc; }
   .app-shell { border: none; height: auto; max-width: none; overflow: visible; }
   .screen { overflow: visible; }
   .qr-print-page { padding: 0; }
-  .qr-cards-grid { display: flex; flex-wrap: wrap; gap: 2mm; }
+  .qr-screen-only { display: none !important; }
+  .qr-print-only { display: flex !important; flex-wrap: wrap; gap: 2mm; }
   .qr-card { width: 51mm; height: 26mm; border: 0.5pt solid #000; border-radius: 2mm; padding: 2mm 3mm; margin: 0; display: flex; align-items: center; gap: 3mm; box-sizing: border-box; break-inside: avoid; }
   .qr-card .qr-name { font-size: 10pt; font-weight: 700; min-width: auto; flex: 1; }
   .qr-card .qr-code-img img { width: 20mm !important; height: 20mm !important; }
   .qr-card .qr-value { display: none; }
 }
+/* 画面では印刷用グリッドを非表示、印刷時は画面用を非表示 */
+.qr-print-only { display: none; }
 /* Camera toggle */
 .camera-toggle { margin-top: 8px; padding: 6px 16px; background: #8b5cf6; color: #fff; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; }
 .camera-toggle:hover { background: #7c3aed; }
@@ -260,14 +263,29 @@ const today = new Date().toISOString().split("T")[0];
 // ==================== Utility ====================
 const fmt = (iso) => { if (!iso) return "\u2014"; const d = new Date(iso); return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`; };
 const dur = (s, e) => { if (!s||!e) return "\u2014"; const d = new Date(e)-new Date(s); return `${Math.floor(d/3600000)}h${String(Math.floor((d%3600000)/60000)).padStart(2,"0")}m`; };
-const prName = (id) => MOCK_PROCESSES.find(p => p.process_id === id)?.process_name || id;
+const durMs = (s, e) => { if (!s||!e) return 0; return new Date(e) - new Date(s); };
+const msToHM = (ms) => { const h = Math.floor(ms/3600000); const m = Math.floor((ms%3600000)/60000); return `${h}h${String(m).padStart(2,"0")}m`; };
+const prName = (id) => id === "day_end" ? "工場業務終了" : (MOCK_PROCESSES.find(p => p.process_id === id)?.process_name || id);
+
+// 勤務時間を計算（その日の最初のstart〜day_endまでのトータル - 1h休憩）
+const calcWorkTime = (stamps, empId, dateStr) => {
+  const dayStamps = stamps.filter(s => s.employee_id === empId && s.stamp_time.startsWith(dateStr))
+    .sort((a,b) => new Date(a.stamp_time) - new Date(b.stamp_time));
+  const firstStart = dayStamps.find(s => s.stamp_type === "start");
+  const dayEnd = dayStamps.find(s => s.stamp_type === "day_end");
+  if (!firstStart || !dayEnd) return null;
+  const totalMs = durMs(firstStart.stamp_time, dayEnd.stamp_time);
+  const breakMs = 3600000; // 1h休憩
+  const workMs = Math.max(0, totalMs - breakMs);
+  return { totalMs, workMs, breakMs, isShort: workMs < 7.5 * 3600000, formatted: msToHM(workMs), totalFormatted: msToHM(totalMs) };
+};
 
 // ==================== CSV Export ====================
 const exportCSV = (stamps, filename) => {
   const header = "打刻ID,QRコード,従業員ID,従業員名,工程ID,工程名,打刻種別,打刻日時,修正有無,修正理由,修正者,修正日時,確認済,確認者,確認日時";
   const rows = stamps.map(s => [
     s.stamp_id, s.qr_code, s.employee_id, s.employee_name, s.process_id,
-    prName(s.process_id), s.stamp_type === "start" ? "開始" : "終了",
+    s.process_id === "day_end" ? "工場業務終了" : prName(s.process_id), s.stamp_type === "start" ? "開始" : s.stamp_type === "day_end" ? "業務終了" : "終了",
     s.stamp_time, s.is_modified ? "あり" : "なし", s.modify_reason || "",
     s.modified_by || "", s.modified_at || "", s.confirmed ? "済" : "未",
     s.confirmed_by || "", s.confirmed_at || ""
@@ -316,23 +334,62 @@ const useQRCamera = (onDetect, enabled) => {
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
   const animRef = useRef(null);
-  const [cameraStatus, setCameraStatus] = useState("idle"); // idle, loading, active, error
-  const [facingMode, setFacingMode] = useState("user"); // "user"=インカメラ, "environment"=外カメラ
-  const lastDetectedRef = useRef(null);
+  const [cameraStatus, setCameraStatus] = useState("idle");
+  const [facingMode, setFacingMode] = useState("user");
   const cooldownRef = useRef(false);
+  const onDetectRef = useRef(onDetect);
+  const scanningRef = useRef(false);
+
+  // onDetectの最新参照を常に保持
+  useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
+
+  // スキャンループ（refベースで安定動作）
+  const runScanLoop = () => {
+    if (scanningRef.current) return; // 二重起動防止
+    scanningRef.current = true;
+    const loop = () => {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (!scanningRef.current) return; // 停止チェック
+      if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
+        animRef.current = requestAnimationFrame(loop);
+        return;
+      }
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      if (typeof jsQR !== "undefined") {
+        const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "attemptBoth" });
+        if (code && code.data && !cooldownRef.current) {
+          cooldownRef.current = true;
+          if (onDetectRef.current) onDetectRef.current(code.data);
+          setTimeout(() => { cooldownRef.current = false; }, 3000);
+        }
+      }
+      animRef.current = requestAnimationFrame(loop);
+    };
+    loop();
+  };
+
+  const stopScan = () => {
+    scanningRef.current = false;
+    if (animRef.current) { cancelAnimationFrame(animRef.current); animRef.current = null; }
+  };
 
   const startCamera = useCallback(async (facing) => {
     const mode = facing || facingMode;
     setCameraStatus("loading");
-    // 既存ストリームを停止
+    stopScan();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    if (animRef.current) cancelAnimationFrame(animRef.current);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: mode, width: { ideal: 640 }, height: { ideal: 480 } }
+        video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } }
       });
       streamRef.current = stream;
       if (videoRef.current) {
@@ -340,7 +397,7 @@ const useQRCamera = (onDetect, enabled) => {
         videoRef.current.setAttribute("playsinline", true);
         await videoRef.current.play();
         setCameraStatus("active");
-        scanLoop();
+        runScanLoop();
       }
     } catch (err) {
       console.error("Camera error:", err);
@@ -348,16 +405,8 @@ const useQRCamera = (onDetect, enabled) => {
     }
   }, [facingMode]);
 
-  const toggleCamera = useCallback(() => {
-    const newMode = facingMode === "user" ? "environment" : "user";
-    setFacingMode(newMode);
-    if (enabled) {
-      startCamera(newMode);
-    }
-  }, [facingMode, enabled, startCamera]);
-
   const stopCamera = useCallback(() => {
-    if (animRef.current) cancelAnimationFrame(animRef.current);
+    stopScan();
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
@@ -365,31 +414,11 @@ const useQRCamera = (onDetect, enabled) => {
     setCameraStatus("idle");
   }, []);
 
-  const scanLoop = useCallback(() => {
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
-      animRef.current = requestAnimationFrame(scanLoop);
-      return;
-    }
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-
-    if (typeof jsQR !== "undefined") {
-      const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-      if (code && code.data && !cooldownRef.current) {
-        // 同じQRコードの連続検出を防ぐクールダウン
-        cooldownRef.current = true;
-        lastDetectedRef.current = code.data;
-        onDetect(code.data);
-        setTimeout(() => { cooldownRef.current = false; }, 3000);
-      }
-    }
-    animRef.current = requestAnimationFrame(scanLoop);
-  }, [onDetect]);
+  const toggleCamera = useCallback(() => {
+    const newMode = facingMode === "user" ? "environment" : "user";
+    setFacingMode(newMode);
+    startCamera(newMode);
+  }, [facingMode, startCamera]);
 
   useEffect(() => {
     if (enabled) {
@@ -427,20 +456,15 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
     [...stamps].sort((a,b) => new Date(b.stamp_time) - new Date(a.stamp_time)).slice(0,6),
     [stamps]);
 
-  const getOpenSession = useCallback((empId, prId) => {
-    const es = stamps.filter(s => s.employee_id === empId && s.process_id === prId);
-    const ls = es.filter(s => s.stamp_type === "start").sort((a,b) => new Date(b.stamp_time)-new Date(a.stamp_time))[0];
-    if (!ls) return null;
-    const hasEnd = es.some(s => s.stamp_type === "end" && new Date(s.stamp_time) > new Date(ls.stamp_time));
-    return hasEnd ? null : ls;
+  // 現在作業中の工程を取得（最後のstartで、その後にend/day_endがないもの）
+  const getCurrentProcess = useCallback((empId) => {
+    const empStamps = stamps.filter(s => s.employee_id === empId).sort((a,b) => new Date(b.stamp_time) - new Date(a.stamp_time));
+    for (const s of empStamps) {
+      if (s.stamp_type === "end" || s.stamp_type === "day_end") return null;
+      if (s.stamp_type === "start") return s;
+    }
+    return null;
   }, [stamps]);
-
-  const getOpenSessions = useCallback((empId) => {
-    return factoryProcesses.filter(pr => getOpenSession(empId, pr.process_id)).map(pr => ({
-      process: pr,
-      startStamp: getOpenSession(empId, pr.process_id)
-    }));
-  }, [factoryProcesses, getOpenSession]);
 
   const scanQR = useCallback((emp) => {
     setCurrentEmp(emp);
@@ -449,30 +473,81 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
     if (timer) clearTimeout(timer);
   }, [timer]);
 
-  const doStamp = useCallback((processId, type) => {
+  const doStamp = useCallback((processId) => {
     const now = new Date();
-    const openSession = getOpenSession(currentEmp.employee_id, processId);
-    const st = type || (openSession ? "end" : "start");
-    const d = st === "end" && openSession ? dur(openSession.stamp_time, now.toISOString()) : null;
+    const currentProc = getCurrentProcess(currentEmp.employee_id);
+    const newStamps = [];
+    let prevDuration = null;
+    let prevProcessName = null;
 
-    setStamps(prev => [...prev, {
-      stamp_id: `stm_${Date.now()}`, qr_code: currentEmp.qr_code, employee_id: currentEmp.employee_id,
+    // 作業中の工程があれば自動終了
+    if (currentProc) {
+      newStamps.push({
+        stamp_id: `stm_${Date.now()}_end`, qr_code: currentEmp.qr_code, employee_id: currentEmp.employee_id,
+        employee_name: currentEmp.employee_name, process_id: currentProc.process_id,
+        stamp_type: "end", stamp_time: now.toISOString(), is_modified: false,
+        modify_reason: "", modified_by: "", modified_at: "",
+        confirmed: false, confirmed_by: "", confirmed_at: "",
+      });
+      prevDuration = dur(currentProc.stamp_time, now.toISOString());
+      prevProcessName = prName(currentProc.process_id);
+    }
+
+    // 新工程を開始
+    newStamps.push({
+      stamp_id: `stm_${Date.now()}_start`, qr_code: currentEmp.qr_code, employee_id: currentEmp.employee_id,
       employee_name: currentEmp.employee_name, process_id: processId,
-      stamp_type: st, stamp_time: now.toISOString(), is_modified: false,
+      stamp_type: "start", stamp_time: now.toISOString(), is_modified: false,
       modify_reason: "", modified_by: "", modified_at: "",
       confirmed: false, confirmed_by: "", confirmed_at: "",
-    }]);
+    });
 
-    setFb({type: st, name: currentEmp.employee_name, time: now, duration: d, processName: prName(processId)});
+    setStamps(prev => [...prev, ...newStamps]);
+    setFb({
+      type: "start", name: currentEmp.employee_name, time: now, duration: null,
+      processName: prName(processId),
+      prevProcessName: prevProcessName, prevDuration: prevDuration
+    });
     setPhase("feedback");
-    const t = setTimeout(() => {
-      setPhase("idle");
-      setFb(null);
-      setCurrentEmp(null);
-      setCameraEnabled(true);
-    }, 3500);
+    const t = setTimeout(() => { setPhase("idle"); setFb(null); setCurrentEmp(null); setCameraEnabled(true); }, 3500);
     setTimer(t);
-  }, [currentEmp, getOpenSession, setStamps, timer]);
+  }, [currentEmp, getCurrentProcess, setStamps, timer]);
+
+  // 工場業務終了
+  const doDayEnd = useCallback(() => {
+    const now = new Date();
+    const currentProc = getCurrentProcess(currentEmp.employee_id);
+    const newStamps = [];
+
+    // 作業中の工程があれば終了
+    if (currentProc) {
+      newStamps.push({
+        stamp_id: `stm_${Date.now()}_end`, qr_code: currentEmp.qr_code, employee_id: currentEmp.employee_id,
+        employee_name: currentEmp.employee_name, process_id: currentProc.process_id,
+        stamp_type: "end", stamp_time: now.toISOString(), is_modified: false,
+        modify_reason: "", modified_by: "", modified_at: "",
+        confirmed: false, confirmed_by: "", confirmed_at: "",
+      });
+    }
+
+    // 業務終了レコード
+    newStamps.push({
+      stamp_id: `stm_${Date.now()}_dayend`, qr_code: currentEmp.qr_code, employee_id: currentEmp.employee_id,
+      employee_name: currentEmp.employee_name, process_id: "day_end",
+      stamp_type: "day_end", stamp_time: now.toISOString(), is_modified: false,
+      modify_reason: "", modified_by: "", modified_at: "",
+      confirmed: false, confirmed_by: "", confirmed_at: "",
+    });
+
+    const updatedStamps = [...stamps, ...newStamps];
+    setStamps(updatedStamps);
+    // 勤務時間を計算
+    const wt = calcWorkTime(updatedStamps, currentEmp.employee_id, today);
+    setFb({type: "day_end", name: currentEmp.employee_name, time: now, duration: null, processName: "工場業務終了", workTime: wt});
+    setPhase("feedback");
+    const t = setTimeout(() => { setPhase("idle"); setFb(null); setCurrentEmp(null); setCameraEnabled(true); }, 5000);
+    setTimer(t);
+  }, [currentEmp, getCurrentProcess, stamps, setStamps, timer]);
 
   const cancel = () => { setPhase("idle"); setCurrentEmp(null); setCameraEnabled(true); };
 
@@ -500,38 +575,47 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
       cameraStatus === "loading" ? "カメラ起動中..." : "待機中"));
 
   const renderProcessSelect = () => {
-    const openSessions = getOpenSessions(currentEmp.employee_id);
+    const currentProc = getCurrentProcess(currentEmp.employee_id);
     return React.createElement("div", {className:"process-select"},
       React.createElement("div", {className:"greeting"},
         React.createElement("div", {className:"name"}, `${currentEmp.employee_name} さん`),
-        React.createElement("div", {className:"sub"}, openSessions.length > 0
-          ? `現在「${openSessions.map(s=>s.process.process_name).join('・')}」で作業中`
-          : "担当工程を選択してください")),
-      openSessions.length > 0 && React.createElement("div", {style:{marginBottom: 16}},
-        React.createElement("div", {className:"label"}, "作業中の工程を終了する"),
-        React.createElement("div", {className:"process-grid"},
-          openSessions.map(s => React.createElement("button", {
-            key: s.process.process_id, className: "process-btn active-process",
-            onClick: () => doStamp(s.process.process_id, "end")
-          }, `${s.process.process_name}\n（終了）`)))),
-      React.createElement("div", {className:"label"}, openSessions.length > 0 ? "新しい工程を開始する" : "工程を選択して開始"),
+        React.createElement("div", {className:"sub"}, currentProc
+          ? `現在「${prName(currentProc.process_id)}」で作業中`
+          : "工程を選択してください")),
+      currentProc && React.createElement("div", {style:{marginBottom:12,padding:"8px 12px",background:"#f0fdf4",borderRadius:8,fontSize:13,color:"#15803d"}},
+        `\u25B6 ${prName(currentProc.process_id)} 作業中（${fmt(currentProc.stamp_time)}〜）`),
+      React.createElement("div", {className:"label"}, currentProc ? "次の工程に切り替える（現在の工程は自動終了）" : "工程を選択して開始"),
       React.createElement("div", {className:"process-grid"},
-        factoryProcesses.filter(pr => !openSessions.some(s => s.process.process_id === pr.process_id))
+        factoryProcesses
+          .filter(pr => !(currentProc && pr.process_id === currentProc.process_id))
           .map(pr => React.createElement("button", {
             key: pr.process_id, className: "process-btn",
-            onClick: () => doStamp(pr.process_id, "start")
+            onClick: () => doStamp(pr.process_id)
           }, pr.process_name))),
+      React.createElement("div", {style:{marginTop:16}},
+        React.createElement("button", {
+          className: "process-btn", onClick: doDayEnd,
+          style: {width:"100%",background:"#1e293b",color:"#fff",border:"none",padding:16,fontSize:16,fontWeight:700,borderRadius:12}
+        }, "\u23F9 工場業務終了")),
       React.createElement("div", {className:"cancel-link"},
         React.createElement("button", {onClick: cancel}, "キャンセル")));
   };
 
   const renderFeedback = () => fb && React.createElement("div", {style:{flex:1,display:"flex",alignItems:"center",justifyContent:"center",padding:24}},
-    React.createElement("div", {className:`feedback ${fb.type}`},
-      React.createElement("div", {className:"big-icon"}, fb.type === "start" ? "\u25B6" : "\u25A0"),
+    React.createElement("div", {className:`feedback ${fb.type === "day_end" ? "end" : fb.type}`},
+      React.createElement("div", {className:"big-icon"}, fb.type === "day_end" ? "\u23F9" : "\u25B6"),
       React.createElement("div", {className:"name"}, fb.name),
+      fb.prevProcessName && React.createElement("div", {style:{fontSize:14,color:"#64748b",marginBottom:4}},
+        `${fb.prevProcessName} 終了（${fb.prevDuration}）`),
       React.createElement("div", {className:"process-name"}, fb.processName),
-      React.createElement("div", {className:`action ${fb.type}-text`}, `${fb.type === "start" ? "作業開始" : "作業終了"} ${fmt(fb.time.toISOString())}`),
-      fb.duration && React.createElement("div", {className:"duration"}, `作業時間: ${fb.duration}`)));
+      React.createElement("div", {className:`action ${fb.type === "day_end" ? "end" : fb.type}-text`},
+        `${fb.type === "day_end" ? "業務終了" : "作業開始"} ${fmt(fb.time.toISOString())}`),
+      fb.workTime && React.createElement("div", {style:{marginTop:12,padding:"10px 16px",borderRadius:8,background:fb.workTime.isShort?"#fef2f2":"#f0fdf4",textAlign:"center"}},
+        React.createElement("div", {style:{fontSize:13,color:"#64748b"}}, `拘束時間: ${fb.workTime.totalFormatted}（休憩1h控除）`),
+        React.createElement("div", {style:{fontSize:22,fontWeight:700,color:fb.workTime.isShort?"#dc2626":"#15803d",marginTop:4}},
+          `勤務時間: ${fb.workTime.formatted}`),
+        fb.workTime.isShort && React.createElement("div", {style:{fontSize:13,color:"#dc2626",fontWeight:600,marginTop:4}},
+          "\u26A0 勤務時間が7.5時間未満です"))));
 
   return React.createElement("div", {className:"screen"},
     React.createElement("div", {className:"header"},
@@ -559,31 +643,53 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
       recent.length === 0
         ? React.createElement("div", {className:"recent-empty"}, "打刻履歴なし")
         : recent.map(s => React.createElement("div", {key:s.stamp_id,className:"recent-item"},
-          React.createElement("span", {className:`badge ${s.stamp_type}`}, s.stamp_type==="start"?"開始":"終了"),
+          React.createElement("span", {className:`badge ${s.stamp_type === "day_end" ? "end" : s.stamp_type}`},
+            s.stamp_type === "start" ? "開始" : s.stamp_type === "day_end" ? "業終" : "終了"),
           React.createElement("span", {className:"name"}, s.employee_name),
-          React.createElement("span", {className:"wp"}, prName(s.process_id)),
+          React.createElement("span", {className:"wp"}, s.process_id === "day_end" ? "工場業務終了" : prName(s.process_id)),
           React.createElement("span", {className:"time"}, fmt(s.stamp_time)))))
   );
 };
 
 // ==================== History Screen ====================
 const HistoryScreen = ({stamps, employees, processes, onEdit}) => {
-  const [selEmp, setSelEmp] = useState("");
+  const [selEmp, setSelEmp] = useState("all");
   const [selDate, setSelDate] = useState(today);
+  const [sortCol, setSortCol] = useState("start");
+  const [sortAsc, setSortAsc] = useState(false); // デフォルト：開始の最新順（降順）
+
+  const toggleSort = (col) => {
+    if (sortCol === col) { setSortAsc(!sortAsc); } else { setSortCol(col); setSortAsc(col === "emp"); }
+  };
+  const sortIcon = (col) => sortCol === col ? (sortAsc ? " \u25B2" : " \u25BC") : "";
+
   const es = useMemo(() => {
-    if (!selEmp) return [];
-    return stamps.filter(s => s.employee_id===selEmp && s.stamp_time.startsWith(selDate)).sort((a,b)=>new Date(a.stamp_time)-new Date(b.stamp_time));
+    return stamps
+      .filter(s => (selEmp === "all" || s.employee_id === selEmp) && s.stamp_time.startsWith(selDate));
   }, [stamps, selEmp, selDate]);
+
   const pairs = useMemo(() => {
-    const r = []; const bw = {};
-    es.forEach(s => { if (!bw[s.process_id]) bw[s.process_id]=[]; bw[s.process_id].push(s); });
-    Object.entries(bw).forEach(([pid, ws]) => {
-      const st = ws.filter(s=>s.stamp_type==="start"); const en = ws.filter(s=>s.stamp_type==="end");
-      st.forEach((s,i) => r.push({start:s,end:en[i]||null,process_id:pid}));
+    const r = [];
+    const byEmpProc = {};
+    es.forEach(s => {
+      if (s.stamp_type === "day_end") { r.push({start:s, end:null, process_id:"day_end", isDayEnd:true}); return; }
+      const k = `${s.employee_id}_${s.process_id}`;
+      if (!byEmpProc[k]) byEmpProc[k] = [];
+      byEmpProc[k].push(s);
     });
-    r.sort((a,b)=>new Date(a.start.stamp_time)-new Date(b.start.stamp_time));
+    Object.entries(byEmpProc).forEach(([k, ss]) => {
+      const starts = ss.filter(s => s.stamp_type === "start").sort((a,b) => new Date(a.stamp_time) - new Date(b.stamp_time));
+      const ends = ss.filter(s => s.stamp_type === "end").sort((a,b) => new Date(a.stamp_time) - new Date(b.stamp_time));
+      starts.forEach((s, i) => r.push({start: s, end: ends[i] || null, process_id: s.process_id}));
+    });
+    // ソート
+    const dir = sortAsc ? 1 : -1;
+    if (sortCol === "emp") r.sort((a,b) => dir * a.start.employee_name.localeCompare(b.start.employee_name));
+    else if (sortCol === "process") r.sort((a,b) => dir * prName(a.process_id).localeCompare(prName(b.process_id)));
+    else if (sortCol === "start") r.sort((a,b) => dir * (new Date(a.start.stamp_time) - new Date(b.start.stamp_time)));
+    else if (sortCol === "end") r.sort((a,b) => dir * ((a.end?new Date(a.end.stamp_time):0) - (b.end?new Date(b.end.stamp_time):0)));
     return r;
-  }, [es]);
+  }, [es, sortCol, sortAsc]);
 
   return React.createElement("div", {className:"screen"},
     React.createElement("div", {className:"header"}, React.createElement("div", {className:"header-title"}, "打刻履歴")),
@@ -591,27 +697,45 @@ const HistoryScreen = ({stamps, employees, processes, onEdit}) => {
       React.createElement("div", {className:"form-row"},
         React.createElement("div", {className:"form-group"},
           React.createElement("span", {className:"form-label"}, "従業員"),
-          React.createElement("select", {value:selEmp,onChange:e=>setSelEmp(e.target.value)},
-            React.createElement("option", {value:""}, "選択してください"),
-            employees.map(e=>React.createElement("option",{key:e.employee_id,value:e.employee_id},e.employee_name)))),
+          React.createElement("select", {value:selEmp, onChange:e=>setSelEmp(e.target.value)},
+            React.createElement("option", {value:"all"}, "全て"),
+            employees.map(e => React.createElement("option", {key:e.employee_id, value:e.employee_id}, e.employee_name)))),
         React.createElement("div", {className:"form-group"},
           React.createElement("span", {className:"form-label"}, "日付"),
-          React.createElement("input", {type:"date",value:selDate,onChange:e=>setSelDate(e.target.value)}))),
-      !selEmp ? React.createElement("div", {style:{textAlign:"center",color:"#94a3b8",padding:48}}, "従業員を選択してください")
-      : pairs.length===0 ? React.createElement("div", {style:{textAlign:"center",color:"#94a3b8",padding:48}}, "打刻データがありません")
-      : React.createElement("table", null,
-        React.createElement("thead", null, React.createElement("tr", null,
-          ["工程","開始","終了","時間","状態",""].map(h=>React.createElement("th",{key:h},h)))),
-        React.createElement("tbody", null, pairs.map((p,i) => {
-          const st = !p.end?"no_end":p.start.is_modified||(p.end&&p.end.is_modified)?"modified":p.start.confirmed?"confirmed":"ok";
-          return React.createElement("tr", {key:i},
-            React.createElement("td", {style:{fontWeight:600}}, prName(p.process_id)),
-            React.createElement("td", {className:"mono"}, fmt(p.start.stamp_time)),
-            React.createElement("td", {className:"mono"}, p.end?fmt(p.end.stamp_time):"\u2014"),
-            React.createElement("td", {className:"mono"}, p.end?dur(p.start.stamp_time,p.end.stamp_time):"\u2014"),
-            React.createElement("td", null, React.createElement(StatusBadge, {status:st})),
-            React.createElement("td", null, React.createElement("button", {className:"btn-link",onClick:()=>onEdit(p.start)}, "修正")));
-        }))))
+          React.createElement("input", {type:"date", value:selDate, onChange:e=>setSelDate(e.target.value)}))),
+      pairs.length === 0
+        ? React.createElement("div", {style:{textAlign:"center",color:"#94a3b8",padding:48}}, "打刻データがありません")
+        : React.createElement("table", null,
+          React.createElement("thead", null, React.createElement("tr", null,
+            React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("emp")}, `従業員${sortIcon("emp")}`),
+            React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("process")}, `工程${sortIcon("process")}`),
+            React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("start")}, `開始${sortIcon("start")}`),
+            React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("end")}, `終了${sortIcon("end")}`),
+            React.createElement("th", null, "時間"),
+            React.createElement("th", null, "状態"),
+            React.createElement("th", null, ""))),
+          React.createElement("tbody", null, pairs.map((p, i) => {
+            if (p.isDayEnd) {
+              const wt = calcWorkTime(stamps, p.start.employee_id, selDate);
+              return React.createElement("tr", {key:i, style:{background:"#f8fafc"}},
+                React.createElement("td", {style:{fontWeight:600}}, p.start.employee_name),
+                React.createElement("td", {style:{fontWeight:600,color:"#1e293b"}}, `\u23F9 工場業務終了`),
+                React.createElement("td", {className:"mono"}, fmt(p.start.stamp_time)),
+                React.createElement("td", null),
+                React.createElement("td", {className:"mono",style:{fontWeight:700,color:wt&&wt.isShort?"#dc2626":"#15803d"}}, wt ? wt.formatted : "\u2014"),
+                React.createElement("td", {style:{fontSize:11,color:wt&&wt.isShort?"#dc2626":"#64748b"}}, wt&&wt.isShort ? "\u26A0 7.5h未満" : ""),
+                React.createElement("td", null));
+            }
+            const st = !p.end ? "no_end" : p.start.is_modified || (p.end && p.end.is_modified) ? "modified" : p.start.confirmed ? "confirmed" : "ok";
+            return React.createElement("tr", {key:i},
+              React.createElement("td", {style:{fontWeight:600}}, p.start.employee_name),
+              React.createElement("td", {style:{fontWeight:600}}, prName(p.process_id)),
+              React.createElement("td", {className:"mono"}, fmt(p.start.stamp_time)),
+              React.createElement("td", {className:"mono"}, p.end ? fmt(p.end.stamp_time) : "\u2014"),
+              React.createElement("td", {className:"mono"}, p.end ? dur(p.start.stamp_time, p.end.stamp_time) : "\u2014"),
+              React.createElement("td", null, React.createElement(StatusBadge, {status:st})),
+              React.createElement("td", null, React.createElement("button", {className:"btn-link", onClick:()=>onEdit(p.start)}, "修正")));
+          }))))
   );
 };
 
@@ -674,83 +798,190 @@ const EditScreen = ({stamp, stamps, setStamps, onBack, processes}) => {
 // ==================== Manager Screen ====================
 const ManagerScreen = ({stamps, setStamps, employees, processes}) => {
   const [selDate, setSelDate] = useState(today);
+  const [filterFactory, setFilterFactory] = useState("");
   const [filterPr, setFilterPr] = useState("");
   const [editing, setEditing] = useState(null);
+  const [sortCol, setSortCol] = useState("emp");
+  const [sortAsc, setSortAsc] = useState(true);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [addEmp, setAddEmp] = useState("");
+  const [addPr, setAddPr] = useState("");
+  const [addStart, setAddStart] = useState("");
+  const [addEnd, setAddEnd] = useState("");
+  const [addReason, setAddReason] = useState("工程誤差調整");
 
-  const ds = useMemo(()=>stamps.filter(s=>s.stamp_time.startsWith(selDate)),[stamps,selDate]);
-  const pairs = useMemo(()=>{
-    const r=[]; const g={};
-    ds.forEach(s=>{const k=`${s.employee_id}_${s.process_id}`;if(!g[k])g[k]=[];g[k].push(s);});
-    Object.entries(g).forEach(([k,ss])=>{
-      if(filterPr&&!k.endsWith(filterPr))return;
-      const st=ss.filter(s=>s.stamp_type==="start").sort((a,b)=>new Date(a.stamp_time)-new Date(b.stamp_time));
-      const en=ss.filter(s=>s.stamp_type==="end").sort((a,b)=>new Date(a.stamp_time)-new Date(b.stamp_time));
-      st.forEach((s,i)=>r.push({start:s,end:en[i]||null}));
+  const filteredProcesses = useMemo(() => filterFactory ? processes.filter(p => p.factory_id === filterFactory) : processes, [processes, filterFactory]);
+
+  const handleFactoryChange = (fid) => {
+    setFilterFactory(fid);
+    setFilterPr("");
+    setAddPr("");
+  };
+
+  const toggleSort = (col) => {
+    if (sortCol === col) { setSortAsc(!sortAsc); } else { setSortCol(col); setSortAsc(col === "emp"); }
+  };
+  const sortIcon = (col) => sortCol === col ? (sortAsc ? " \u25B2" : " \u25BC") : "";
+
+  const factoryProcIds = useMemo(() => filterFactory ? new Set(processes.filter(p => p.factory_id === filterFactory).map(p => p.process_id)) : null, [processes, filterFactory]);
+  const ds = useMemo(() => stamps.filter(s => s.stamp_time.startsWith(selDate)), [stamps, selDate]);
+  const pairs = useMemo(() => {
+    const r = [];
+    const byEmpProc = {};
+    ds.forEach(s => {
+      if (s.stamp_type === "day_end") { r.push({start:s, end:null, isDayEnd:true}); return; }
+      if (factoryProcIds && !factoryProcIds.has(s.process_id)) return;
+      const k = `${s.employee_id}_${s.process_id}`;
+      if (!byEmpProc[k]) byEmpProc[k] = [];
+      byEmpProc[k].push(s);
     });
-    r.sort((a,b)=>a.start.employee_name.localeCompare(b.start.employee_name)||new Date(a.start.stamp_time)-new Date(b.start.stamp_time));
+    Object.entries(byEmpProc).forEach(([k, ss]) => {
+      if (filterPr && !k.endsWith(filterPr)) return;
+      const starts = ss.filter(s => s.stamp_type === "start").sort((a,b) => new Date(a.stamp_time) - new Date(b.stamp_time));
+      const ends = ss.filter(s => s.stamp_type === "end").sort((a,b) => new Date(a.stamp_time) - new Date(b.stamp_time));
+      starts.forEach((s, i) => r.push({start: s, end: ends[i] || null}));
+    });
+    const dir = sortAsc ? 1 : -1;
+    if (sortCol === "emp") r.sort((a,b) => dir * a.start.employee_name.localeCompare(b.start.employee_name) || new Date(a.start.stamp_time) - new Date(b.start.stamp_time));
+    else if (sortCol === "process") r.sort((a,b) => dir * prName(a.start.process_id).localeCompare(prName(b.start.process_id)));
+    else if (sortCol === "start") r.sort((a,b) => dir * (new Date(a.start.stamp_time) - new Date(b.start.stamp_time)));
+    else if (sortCol === "end") r.sort((a,b) => dir * ((a.end?new Date(a.end.stamp_time):0) - (b.end?new Date(b.end.stamp_time):0)));
     return r;
-  },[ds,filterPr]);
+  }, [ds, filterPr, factoryProcIds, sortCol, sortAsc]);
 
-  const alerts = useMemo(()=>pairs.filter(p=>!p.end||p.start.is_modified||p.end?.is_modified),[pairs]);
-  const allConf = pairs.length>0&&pairs.every(p=>p.start.confirmed);
+  const alerts = useMemo(() => pairs.filter(p => !p.isDayEnd && (!p.end || p.start.is_modified || p.end?.is_modified)), [pairs]);
+  const allConf = pairs.length > 0 && pairs.every(p => p.start.confirmed);
 
-  const confirm1 = (id)=>setStamps(p=>p.map(s=>s.stamp_id===id?{...s,confirmed:true,confirmed_by:"mgr_001",confirmed_at:new Date().toISOString()}:s));
-  const confirmAll = ()=>{const ids=new Set(ds.map(s=>s.stamp_id));setStamps(p=>p.map(s=>ids.has(s.stamp_id)?{...s,confirmed:true,confirmed_by:"mgr_001",confirmed_at:new Date().toISOString()}:s));};
+  const confirm1 = (id) => setStamps(p => p.map(s => s.stamp_id === id ? {...s, confirmed:true, confirmed_by:"mgr_001", confirmed_at:new Date().toISOString()} : s));
+  const confirmAll = () => { const ids = new Set(ds.map(s => s.stamp_id)); setStamps(p => p.map(s => ids.has(s.stamp_id) ? {...s, confirmed:true, confirmed_by:"mgr_001", confirmed_at:new Date().toISOString()} : s)); };
 
-  if (editing) return React.createElement(EditScreen,{stamp:editing,stamps,setStamps,onBack:()=>setEditing(null),processes});
+  const doAddStamp = () => {
+    if (!addEmp || !addPr || !addStart) return;
+    const emp = employees.find(e => e.employee_id === addEmp);
+    if (!emp) return;
+    const newStamps = [];
+    newStamps.push({
+      stamp_id: `stm_mgr_${Date.now()}_s`, qr_code: emp.qr_code, employee_id: emp.employee_id,
+      employee_name: emp.employee_name, process_id: addPr,
+      stamp_type: "start", stamp_time: `${selDate}T${addStart}:00`, is_modified: true,
+      modify_reason: addReason, modified_by: "mgr_001", modified_at: new Date().toISOString(),
+      confirmed: false, confirmed_by: "", confirmed_at: "",
+    });
+    if (addEnd) {
+      newStamps.push({
+        stamp_id: `stm_mgr_${Date.now()}_e`, qr_code: emp.qr_code, employee_id: emp.employee_id,
+        employee_name: emp.employee_name, process_id: addPr,
+        stamp_type: "end", stamp_time: `${selDate}T${addEnd}:00`, is_modified: true,
+        modify_reason: addReason, modified_by: "mgr_001", modified_at: new Date().toISOString(),
+        confirmed: false, confirmed_by: "", confirmed_at: "",
+      });
+    }
+    setStamps(prev => [...prev, ...newStamps]);
+    setShowAddForm(false); setAddEmp(""); setAddPr(""); setAddStart(""); setAddEnd("");
+  };
 
-  return React.createElement("div",{className:"screen"},
-    React.createElement("div",{className:"header"},React.createElement("div",{className:"header-title"},"日次確認（管理者）")),
-    React.createElement("div",{className:"section-content"},
-      React.createElement("div",{className:"form-row"},
-        React.createElement("div",{className:"form-group"},React.createElement("span",{className:"form-label"},"日付"),React.createElement("input",{type:"date",value:selDate,onChange:e=>setSelDate(e.target.value)})),
-        React.createElement("div",{className:"form-group"},React.createElement("span",{className:"form-label"},"工程"),
-          React.createElement("select",{value:filterPr,onChange:e=>setFilterPr(e.target.value)},
-            React.createElement("option",{value:""},"すべて"),
-            processes.map(p=>React.createElement("option",{key:p.process_id,value:p.process_id},p.process_name)))),
-        React.createElement("button",{className:"btn btn-green",disabled:allConf,onClick:confirmAll},"全件確認済み"),
-        React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_${selDate}.csv`)},"\u2B07 CSV出力"),
-        React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_全件_${today}.csv`)},"\u2B07 全日CSV")),
-      alerts.length>0&&React.createElement("div",{className:"alert-box"},
-        React.createElement("div",{className:"alert-title"},`要確認: ${alerts.length}件`),
-        alerts.slice(0,5).map((a,i)=>React.createElement("div",{key:i,className:"alert-item"},
-          `${!a.end?"\u26A0":"\uD83D\uDD27"} ${a.start.employee_name} / ${prName(a.start.process_id)} ${!a.end?"- 終了未打刻":"- 修正済み"}`))),
-      React.createElement("table",null,
-        React.createElement("thead",null,React.createElement("tr",null,
-          ["従業員","工程","開始","終了","時間","状態","操作"].map(h=>React.createElement("th",{key:h},h)))),
-        React.createElement("tbody",null,
-          pairs.length===0?React.createElement("tr",null,React.createElement("td",{colSpan:7,style:{textAlign:"center",padding:32,color:"#94a3b8"}},"データがありません"))
-          :pairs.map((p,i)=>{
-            const st=p.start.confirmed?"confirmed":!p.end?"no_end":(p.start.is_modified||p.end?.is_modified)?"modified":"ok";
-            return React.createElement("tr",{key:i},
-              React.createElement("td",{style:{fontWeight:600}},p.start.employee_name),
-              React.createElement("td",null,prName(p.start.process_id)),
-              React.createElement("td",{className:"mono"},fmt(p.start.stamp_time)),
-              React.createElement("td",{className:"mono"},p.end?fmt(p.end.stamp_time):"\u2014"),
-              React.createElement("td",{className:"mono"},p.end?dur(p.start.stamp_time,p.end.stamp_time):"\u2014"),
-              React.createElement("td",null,React.createElement(StatusBadge,{status:st})),
-              React.createElement("td",null,
-                React.createElement("div",{style:{display:"flex",gap:8,justifyContent:"center"}},
-                  !p.start.confirmed&&React.createElement("button",{className:"btn-link",onClick:()=>confirm1(p.start.stamp_id)},"確認"),
-                  React.createElement("button",{className:"btn-link",onClick:()=>setEditing(p.start)},"修正"))));
+  if (editing) return React.createElement(EditScreen, {stamp:editing, stamps, setStamps, onBack:()=>setEditing(null), processes});
+
+  return React.createElement("div", {className:"screen"},
+    React.createElement("div", {className:"header"}, React.createElement("div", {className:"header-title"}, "日次確認（管理者）")),
+    React.createElement("div", {className:"section-content"},
+      React.createElement("div", {className:"form-row"},
+        React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "日付"), React.createElement("input", {type:"date", value:selDate, onChange:e=>setSelDate(e.target.value)})),
+        React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "工場"),
+          React.createElement("select", {value:filterFactory, onChange:e=>handleFactoryChange(e.target.value)},
+            React.createElement("option", {value:""}, "すべて"),
+            FACTORIES.map(f => React.createElement("option", {key:f.factory_id, value:f.factory_id}, f.factory_name)))),
+        React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "工程"),
+          React.createElement("select", {value:filterPr, onChange:e=>setFilterPr(e.target.value)},
+            React.createElement("option", {value:""}, "すべて"),
+            filteredProcesses.map(p => React.createElement("option", {key:p.process_id, value:p.process_id}, p.process_name)))),
+        React.createElement("button", {className:"btn btn-green", disabled:allConf, onClick:confirmAll}, "全件確認済み"),
+        React.createElement("button", {className:"btn btn-csv", onClick:()=>exportCSV(stamps, `工数ログ_${selDate}.csv`)}, "\u2B07 CSV出力"),
+        React.createElement("button", {className:"btn btn-csv", onClick:()=>exportCSV(stamps, `工数ログ_全件_${today}.csv`)}, "\u2B07 全日CSV"),
+        React.createElement("button", {className:"btn btn-primary", onClick:()=>setShowAddForm(!showAddForm)}, showAddForm ? "\u2715 閉じる" : "\u002B 工程追加")),
+      showAddForm && React.createElement("div", {style:{background:"#f8fafc",borderRadius:8,padding:12,marginBottom:12,border:"1px solid #e2e8f0"}},
+        React.createElement("div", {style:{fontWeight:600,fontSize:13,marginBottom:8,color:"#475569"}}, "工程を手動追加（誤差調整用）"),
+        React.createElement("div", {className:"form-row"},
+          React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "従業員"),
+            React.createElement("select", {value:addEmp, onChange:e=>setAddEmp(e.target.value)},
+              React.createElement("option", {value:""}, "選択"),
+              employees.map(e => React.createElement("option", {key:e.employee_id, value:e.employee_id}, e.employee_name)))),
+          React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "工程"),
+            React.createElement("select", {value:addPr, onChange:e=>setAddPr(e.target.value)},
+              React.createElement("option", {value:""}, "選択"),
+              filteredProcesses.map(p => React.createElement("option", {key:p.process_id, value:p.process_id}, p.process_name)))),
+          React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "開始"),
+            React.createElement("input", {type:"time", value:addStart, onChange:e=>setAddStart(e.target.value)})),
+          React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "終了"),
+            React.createElement("input", {type:"time", value:addEnd, onChange:e=>setAddEnd(e.target.value)})),
+          React.createElement("div", {className:"form-group"}, React.createElement("span", {className:"form-label"}, "理由"),
+            React.createElement("select", {value:addReason, onChange:e=>setAddReason(e.target.value)},
+              ["工程誤差調整","打刻忘れ","工程誤り","その他"].map(r => React.createElement("option", {key:r, value:r}, r)))),
+          React.createElement("button", {className:"btn btn-primary", onClick:doAddStamp, disabled:!addEmp||!addPr||!addStart}, "追加"))),
+      alerts.length > 0 && React.createElement("div", {className:"alert-box"},
+        React.createElement("div", {className:"alert-title"}, `要確認: ${alerts.length}件`),
+        alerts.slice(0,5).map((a,i) => React.createElement("div", {key:i, className:"alert-item"},
+          `${!a.end ? "\u26A0" : "\uD83D\uDD27"} ${a.start.employee_name} / ${prName(a.start.process_id)} ${!a.end ? "- 終了未打刻" : "- 修正済み"}`))),
+      React.createElement("table", null,
+        React.createElement("thead", null, React.createElement("tr", null,
+          React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("emp")}, `従業員${sortIcon("emp")}`),
+          React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("process")}, `工程${sortIcon("process")}`),
+          React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("start")}, `開始${sortIcon("start")}`),
+          React.createElement("th", {style:{cursor:"pointer"},onClick:()=>toggleSort("end")}, `終了${sortIcon("end")}`),
+          React.createElement("th", null, "時間"),
+          React.createElement("th", null, "状態"),
+          React.createElement("th", null, "操作"))),
+        React.createElement("tbody", null,
+          pairs.length === 0 ? React.createElement("tr", null, React.createElement("td", {colSpan:7, style:{textAlign:"center",padding:32,color:"#94a3b8"}}, "データがありません"))
+          : pairs.map((p,i) => {
+            if (p.isDayEnd) {
+              const wt = calcWorkTime(stamps, p.start.employee_id, selDate);
+              return React.createElement("tr", {key:i, style:{background:"#f8fafc"}},
+                React.createElement("td", {style:{fontWeight:600}}, p.start.employee_name),
+                React.createElement("td", {style:{fontWeight:600,color:"#1e293b"}}, `\u23F9 業務終了`),
+                React.createElement("td", {className:"mono"}, fmt(p.start.stamp_time)),
+                React.createElement("td", null),
+                React.createElement("td", {className:"mono",style:{fontWeight:700,color:wt&&wt.isShort?"#dc2626":"#15803d"}}, wt ? wt.formatted : "\u2014"),
+                React.createElement("td", {style:{fontSize:11,color:wt&&wt.isShort?"#dc2626":"#64748b"}}, wt&&wt.isShort ? "\u26A0 7.5h未満" : ""),
+                React.createElement("td", null));
+            }
+            const st = p.start.confirmed ? "confirmed" : !p.end ? "no_end" : (p.start.is_modified || p.end?.is_modified) ? "modified" : "ok";
+            return React.createElement("tr", {key:i},
+              React.createElement("td", {style:{fontWeight:600}}, p.start.employee_name),
+              React.createElement("td", null, prName(p.start.process_id)),
+              React.createElement("td", {className:"mono"}, fmt(p.start.stamp_time)),
+              React.createElement("td", {className:"mono"}, p.end ? fmt(p.end.stamp_time) : "\u2014"),
+              React.createElement("td", {className:"mono"}, p.end ? dur(p.start.stamp_time, p.end.stamp_time) : "\u2014"),
+              React.createElement("td", null, React.createElement(StatusBadge, {status:st})),
+              React.createElement("td", null,
+                React.createElement("div", {style:{display:"flex",gap:8,justifyContent:"center"}},
+                  !p.start.confirmed && React.createElement("button", {className:"btn-link", onClick:()=>confirm1(p.start.stamp_id)}, "確認"),
+                  React.createElement("button", {className:"btn-link", onClick:()=>setEditing(p.start)}, "修正"))));
           }))))
   );
 };
 
 // ==================== QR Print Screen ====================
 const QRPrintScreen = ({employees}) => {
-  // QRコード画像を外部API経由で取得（JSライブラリ不要で確実に表示）
+  const COPIES = 5;
   const getQRUrl = (text) => `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(text)}&color=1e293b&bgcolor=ffffff&margin=8`;
+
+  // 印刷用：各従業員×COPIES枚
+  const printCards = useMemo(() => {
+    const list = [];
+    employees.forEach(emp => {
+      for (let i = 0; i < COPIES; i++) list.push({...emp, copyIndex: i});
+    });
+    return list;
+  }, [employees]);
 
   return React.createElement("div", {className:"screen"},
     React.createElement("div", {className:"header"}, React.createElement("div", {className:"header-title"}, "QRコード印刷")),
     React.createElement("div", {className:"qr-print-page"},
       React.createElement("button", {className:"print-btn no-print", onClick: () => window.print()}, "このページを印刷する"),
       React.createElement("div", {className:"desc no-print"},
-        "以下のQRコードを印刷し、切り取ってご使用ください。",
-        React.createElement("br"),
-        "印刷サイズ: 51mm × 26mm（A4用紙に複数枚印刷されます）"),
-      React.createElement("div", {className:"qr-cards-grid"},
+        "印刷時は1人あたり5枚ずつ出力されます（51mm × 26mm / A4用紙）"),
+      React.createElement("div", {className:"qr-cards-grid qr-screen-only"},
         employees.map(emp =>
           React.createElement("div", {key: emp.employee_id, className:"qr-card"},
             React.createElement("div", {className:"qr-name"}, emp.employee_name),
@@ -761,7 +992,19 @@ const QRPrintScreen = ({employees}) => {
                 style: {display:"block", width:80, height:80},
                 onError: (e) => { e.target.style.display="none"; },
               })),
-            React.createElement("div", {className:"qr-value no-print"}, `${emp.qr_code}`))
+            React.createElement("div", {className:"qr-value"}, `${emp.qr_code}`))
+        )),
+      React.createElement("div", {className:"qr-cards-grid qr-print-only"},
+        printCards.map((emp, idx) =>
+          React.createElement("div", {key: `${emp.employee_id}_${emp.copyIndex}`, className:"qr-card"},
+            React.createElement("div", {className:"qr-name"}, emp.employee_name),
+            React.createElement("div", {className:"qr-code-img"},
+              React.createElement("img", {
+                src: getQRUrl(emp.qr_code),
+                alt: `QR: ${emp.qr_code}`,
+                style: {display:"block", width:80, height:80},
+                onError: (e) => { e.target.style.display="none"; },
+              })))
         )))
   );
 };
