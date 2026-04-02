@@ -254,6 +254,41 @@ const fmt = (iso) => { if (!iso) return "\u2014"; const d = new Date(iso); retur
 const dur = (s, e) => { if (!s||!e) return "\u2014"; const d = new Date(e)-new Date(s); return `${Math.floor(d/3600000)}h${String(Math.floor((d%3600000)/60000)).padStart(2,"0")}m`; };
 const prName = (id) => MOCK_PROCESSES.find(p => p.process_id === id)?.process_name || id;
 
+// ==================== CSV Export ====================
+const exportCSV = (stamps, filename) => {
+  const header = "打刻ID,QRコード,従業員ID,従業員名,工程ID,工程名,打刻種別,打刻日時,修正有無,修正理由,修正者,修正日時,確認済,確認者,確認日時";
+  const rows = stamps.map(s => [
+    s.stamp_id, s.qr_code, s.employee_id, s.employee_name, s.process_id,
+    prName(s.process_id), s.stamp_type === "start" ? "開始" : "終了",
+    s.stamp_time, s.is_modified ? "あり" : "なし", s.modify_reason || "",
+    s.modified_by || "", s.modified_at || "", s.confirmed ? "済" : "未",
+    s.confirmed_by || "", s.confirmed_at || ""
+  ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(","));
+  const bom = "\uFEFF";
+  const csv = bom + header + "\n" + rows.join("\n");
+  const blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename || `工数ログ_${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+};
+
+// ==================== localStorage ====================
+const STORAGE_KEY = "taiyo_seland_stamps";
+const loadStamps = () => {
+  try {
+    const data = localStorage.getItem(STORAGE_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch(e) { return []; }
+};
+const saveStamps = (stamps) => {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stamps)); } catch(e) {}
+};
+
 // ==================== Clock ====================
 const Clock = () => {
   const [now, setNow] = useState(new Date());
@@ -784,46 +819,11 @@ const SettingsScreen = ({processes, employees, currentFactory, setCurrentFactory
         React.createElement("div",{style:{display:"flex",gap:8,flexWrap:"wrap"}},
           React.createElement("button",{className:"btn btn-csv",onClick:()=>exportCSV(stamps,`工数ログ_全件_${today}.csv`),disabled:stamps.length===0},`\u2B07 全データCSV出力（${stamps.length}件）`),
           React.createElement("button",{className:"btn",style:{background:"#dc2626",color:"#fff",fontSize:12,padding:"6px 12px"},
-            onClick:()=>{if(window.confirm(`全${stamps.length}件の打刻データを削除しますか？\n（事前にCSV出力をお勧めします）`)){setStamps([]);localStorage.removeItem(STORAGE_KEY);}}},"全データクリア")))
+            onClick:()=>{if(window.confirm(`全${stamps.length}件の打刻データを削除しますか？\n（事前にCSV出力をお勧めします）`)){setStamps([]);localStorage.removeItem(STORAGE_KEY);}}},"全データクリア"))))
   );
 };
 
 // ==================== Main App ====================
-// ==================== CSV Export ====================
-const exportCSV = (stamps, filename) => {
-  const header = "打刻ID,QRコード,従業員ID,従業員名,工程ID,工程名,打刻種別,打刻日時,修正有無,修正理由,修正者,修正日時,確認済,確認者,確認日時";
-  const rows = stamps.map(s => [
-    s.stamp_id, s.qr_code, s.employee_id, s.employee_name, s.process_id,
-    prName(s.process_id), s.stamp_type === "start" ? "開始" : "終了",
-    s.stamp_time, s.is_modified ? "あり" : "なし", s.modify_reason || "",
-    s.modified_by || "", s.modified_at || "", s.confirmed ? "済" : "未",
-    s.confirmed_by || "", s.confirmed_at || ""
-  ].map(v => `"${String(v).replace(/"/g,'""')}"`).join(","));
-  const bom = "\uFEFF";
-  const csv = bom + header + "\n" + rows.join("\n");
-  const blob = new Blob([csv], {type: "text/csv;charset=utf-8"});
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename || `工数ログ_${new Date().toISOString().slice(0,10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-};
-
-// ==================== localStorage ====================
-const STORAGE_KEY = "taiyo_seland_stamps";
-const loadStamps = () => {
-  try {
-    const data = localStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : [];
-  } catch(e) { return []; }
-};
-const saveStamps = (stamps) => {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stamps)); } catch(e) {}
-};
-
 const App = () => {
   const [stamps, setStamps] = useState(() => loadStamps());
   const [tab, setTab] = useState("stamp");
