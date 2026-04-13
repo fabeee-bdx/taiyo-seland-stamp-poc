@@ -38,6 +38,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino San
 .camera-area { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px; }
 .camera-viewfinder { width: 280px; height: 280px; border: 3px solid #8b5cf6; border-radius: 20px; background: #0f172a; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; }
 .camera-viewfinder video { width: 100%; height: 100%; object-fit: cover; border-radius: 17px; }
+.camera-viewfinder video.mirror { transform: scaleX(-1); }
 .camera-viewfinder canvas { display: none; }
 .camera-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; pointer-events: none; }
 .camera-overlay .corner { position: absolute; width: 28px; height: 28px; border-color: #a78bfa; border-style: solid; }
@@ -83,13 +84,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Hiragino San
 .recent { background: #fff; border-top: 1px solid #e2e8f0; padding: 12px; max-height: 160px; overflow-y: auto; }
 .recent-label { font-size: 11px; color: #94a3b8; margin-bottom: 8px; }
 .recent-empty { font-size: 13px; color: #cbd5e1; text-align: center; padding: 8px; }
-.recent-item { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 6px 8px; border-radius: 6px; background: #f8fafc; margin-bottom: 4px; }
+.recent-item { display: flex; align-items: center; gap: 10px; font-size: 13px; padding: 6px 8px; border-radius: 6px; background: #f8fafc; margin-bottom: 4px; transition: background 0.3s; }
+.recent-item.highlight { animation: highlightPulse 1.5s ease-in-out 3; }
+@keyframes highlightPulse { 0%,100% { background: #f8fafc; } 50% { background: #bbf7d0; } }
 .badge { font-family: monospace; font-size: 11px; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
 .badge.start { background: #dcfce7; color: #15803d; }
 .badge.end { background: #dbeafe; color: #1d4ed8; }
 .recent-item .name { font-weight: 600; min-width: 70px; }
 .recent-item .wp { color: #64748b; font-size: 12px; }
-.recent-item .time { margin-left: auto; font-family: monospace; color: #64748b; }
+.recent-item .date { font-family: monospace; font-size: 12px; color: #94a3b8; margin-left: auto; }
+.recent-item .time { font-family: monospace; color: #64748b; }
 /* Forms and tables */
 .section-content { flex: 1; overflow-y: auto; padding: 16px; }
 .form-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px; }
@@ -166,6 +170,28 @@ tr:hover { background: #f8fafc; }
 }
 /* 画面では印刷用グリッドを非表示、印刷時は画面用を非表示 */
 .qr-print-only { display: none; }
+
+/* スマホ縦向き：stamp-landscapeは縦並び */
+.stamp-landscape { display: flex; flex-direction: column; flex: 1; overflow-y: auto; }
+.stamp-landscape .camera-side { display: flex; flex-direction: column; align-items: center; }
+.stamp-landscape .recent-side { display: flex; flex-direction: column; }
+
+/* ========== タブレット横向きレスポンシブ ========== */
+@media (min-width: 768px) {
+  .app-shell { max-width: 100%; border: none; }
+  .process-grid { grid-template-columns: repeat(4, 1fr); max-height: none; }
+  .stamp-landscape { display: flex; flex-direction: row; gap: 0; flex: 1; overflow: hidden; }
+  .stamp-landscape .camera-side { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 16px; border-right: 1px solid #e2e8f0; }
+  .stamp-landscape .recent-side { width: 320px; flex-shrink: 0; display: flex; flex-direction: column; overflow: hidden; }
+  .stamp-landscape .recent-side .recent { max-height: none; flex: 1; overflow-y: auto; }
+  .stamp-landscape .recent-side .sim-area { flex-shrink: 0; }
+  .camera-viewfinder { width: 240px; height: 240px; }
+}
+@media (min-width: 1024px) {
+  .stamp-landscape .recent-side { width: 400px; }
+  .camera-viewfinder { width: 300px; height: 300px; }
+  .process-grid { grid-template-columns: repeat(4, 1fr); }
+}
 /* Camera toggle */
 .camera-toggle { margin-top: 8px; padding: 6px 16px; background: #8b5cf6; color: #fff; border: none; border-radius: 8px; font-size: 13px; cursor: pointer; }
 .camera-toggle:hover { background: #7c3aed; }
@@ -305,6 +331,7 @@ const exportCSV = (stamps, filename) => {
 
 // ==================== localStorage ====================
 const STORAGE_KEY = "taiyo_seland_stamps";
+const FACTORY_STORAGE_KEY = "taiyo_seland_factory";
 const loadStamps = () => {
   try {
     const data = localStorage.getItem(STORAGE_KEY);
@@ -313,6 +340,16 @@ const loadStamps = () => {
 };
 const saveStamps = (stamps) => {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stamps)); } catch(e) {}
+};
+const loadFactory = () => {
+  try {
+    const fid = localStorage.getItem(FACTORY_STORAGE_KEY);
+    if (fid) { const f = FACTORIES.find(f => f.factory_id === fid); if (f) return f; }
+  } catch(e) {}
+  return FACTORIES[0];
+};
+const saveFactory = (factory) => {
+  try { localStorage.setItem(FACTORY_STORAGE_KEY, factory.factory_id); } catch(e) {}
 };
 
 // ==================== Clock ====================
@@ -339,18 +376,46 @@ const useQRCamera = (onDetect, enabled) => {
   const cooldownRef = useRef(false);
   const onDetectRef = useRef(onDetect);
   const scanningRef = useRef(false);
+  const enabledRef = useRef(enabled);
+  const facingModeRef = useRef(facingMode);
 
-  // onDetectの最新参照を常に保持
+  // 最新参照を常に保持
   useEffect(() => { onDetectRef.current = onDetect; }, [onDetect]);
+  useEffect(() => { enabledRef.current = enabled; }, [enabled]);
+  useEffect(() => { facingModeRef.current = facingMode; }, [facingMode]);
+
+  // ストリームが生きているかチェック
+  const isStreamAlive = () => {
+    if (!streamRef.current) return false;
+    const tracks = streamRef.current.getTracks();
+    return tracks.length > 0 && tracks.every(t => t.readyState === "live");
+  };
 
   // スキャンループ（refベースで安定動作）
   const runScanLoop = () => {
-    if (scanningRef.current) return; // 二重起動防止
+    if (scanningRef.current) return;
     scanningRef.current = true;
+    let deadFrames = 0;
     const loop = () => {
       const video = videoRef.current;
       const canvas = canvasRef.current;
-      if (!scanningRef.current) return; // 停止チェック
+      if (!scanningRef.current) return;
+
+      // ストリーム死亡検知→自動リスタート
+      if (!isStreamAlive()) {
+        deadFrames++;
+        if (deadFrames > 60) { // 約1秒待ってリスタート
+          console.log("Camera stream lost, restarting...");
+          deadFrames = 0;
+          scanningRef.current = false;
+          startCamera(facingModeRef.current);
+          return;
+        }
+        animRef.current = requestAnimationFrame(loop);
+        return;
+      }
+      deadFrames = 0;
+
       if (!video || !canvas || video.readyState !== video.HAVE_ENOUGH_DATA) {
         animRef.current = requestAnimationFrame(loop);
         return;
@@ -380,7 +445,7 @@ const useQRCamera = (onDetect, enabled) => {
   };
 
   const startCamera = useCallback(async (facing) => {
-    const mode = facing || facingMode;
+    const mode = facing || facingModeRef.current;
     setCameraStatus("loading");
     stopScan();
     if (streamRef.current) {
@@ -392,6 +457,17 @@ const useQRCamera = (onDetect, enabled) => {
         video: { facingMode: mode, width: { ideal: 1280 }, height: { ideal: 720 } }
       });
       streamRef.current = stream;
+
+      // トラック終了イベントで自動リスタート（iOS Safari対策）
+      stream.getTracks().forEach(track => {
+        track.addEventListener("ended", () => {
+          console.log("Camera track ended, attempting restart...");
+          if (enabledRef.current) {
+            setTimeout(() => startCamera(facingModeRef.current), 500);
+          }
+        });
+      });
+
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         videoRef.current.setAttribute("playsinline", true);
@@ -403,7 +479,7 @@ const useQRCamera = (onDetect, enabled) => {
       console.error("Camera error:", err);
       setCameraStatus("error");
     }
-  }, [facingMode]);
+  }, []);
 
   const stopCamera = useCallback(() => {
     stopScan();
@@ -419,6 +495,32 @@ const useQRCamera = (onDetect, enabled) => {
     setFacingMode(newMode);
     startCamera(newMode);
   }, [facingMode, startCamera]);
+
+  // visibilitychange: タブ復帰時にカメラ再起動
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && enabledRef.current) {
+        console.log("Tab visible again, restarting camera...");
+        startCamera(facingModeRef.current);
+      } else if (document.visibilityState === "hidden") {
+        stopScan();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [startCamera]);
+
+  // 画面タッチでカメラヘルスチェック→必要ならリスタート
+  useEffect(() => {
+    const handleTouch = () => {
+      if (enabledRef.current && !isStreamAlive()) {
+        console.log("Touch detected with dead stream, restarting...");
+        startCamera(facingModeRef.current);
+      }
+    };
+    document.addEventListener("touchstart", handleTouch, { passive: true });
+    return () => document.removeEventListener("touchstart", handleTouch);
+  }, [startCamera]);
 
   useEffect(() => {
     if (enabled) {
@@ -440,6 +542,7 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
   const [fb, setFb] = useState(null);
   const [timer, setTimer] = useState(null);
   const [cameraEnabled, setCameraEnabled] = useState(true);
+  const [recentHighlight, setRecentHighlight] = useState(new Set());
 
   const handleQRDetect = useCallback((qrData) => {
     const emp = employees.find(e => e.qr_code === qrData);
@@ -452,9 +555,11 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
 
   const { videoRef, canvasRef, cameraStatus, toggleCamera, facingMode } = useQRCamera(handleQRDetect, cameraEnabled && phase === "idle");
 
+  const factoryProcIds = useMemo(() => new Set(factoryProcesses.map(p => p.process_id)), [factoryProcesses]);
   const recent = useMemo(() =>
-    [...stamps].sort((a,b) => new Date(b.stamp_time) - new Date(a.stamp_time)).slice(0,6),
-    [stamps]);
+    [...stamps].filter(s => s.process_id === "day_end" || factoryProcIds.has(s.process_id))
+    .sort((a,b) => new Date(b.stamp_time) - new Date(a.stamp_time)).slice(0,6),
+    [stamps, factoryProcIds]);
 
   // 現在作業中の工程を取得（最後のstartで、その後にend/day_endがないもの）
   const getCurrentProcess = useCallback((empId) => {
@@ -503,6 +608,9 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
     });
 
     setStamps(prev => [...prev, ...newStamps]);
+    const newIds = new Set(newStamps.map(s => s.stamp_id));
+    setRecentHighlight(newIds);
+    setTimeout(() => setRecentHighlight(new Set()), 5000);
     setFb({
       type: "start", name: currentEmp.employee_name, time: now, duration: null,
       processName: prName(processId),
@@ -541,6 +649,9 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
 
     const updatedStamps = [...stamps, ...newStamps];
     setStamps(updatedStamps);
+    const newIds = new Set(newStamps.map(s => s.stamp_id));
+    setRecentHighlight(newIds);
+    setTimeout(() => setRecentHighlight(new Set()), 5000);
     // 勤務時間を計算
     const wt = calcWorkTime(updatedStamps, currentEmp.employee_id, today);
     setFb({type: "day_end", name: currentEmp.employee_name, time: now, duration: null, processName: "工場業務終了", workTime: wt});
@@ -554,7 +665,7 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
   // Camera viewfinder with live video
   const renderIdle = () => React.createElement("div", {className:"camera-area"},
     React.createElement("div", {className:"camera-viewfinder"},
-      React.createElement("video", {ref: videoRef, style:{width:"100%",height:"100%",objectFit:"cover",borderRadius:17}}),
+      React.createElement("video", {ref: videoRef, className: facingMode === "user" ? "mirror" : "", style:{width:"100%",height:"100%",objectFit:"cover",borderRadius:17}}),
       React.createElement("canvas", {ref: canvasRef, style:{display:"none"}}),
       React.createElement("div", {className:"camera-overlay"},
         React.createElement("div", {className:"corner tl"}),
@@ -630,24 +741,29 @@ const StampScreen = ({stamps, setStamps, employees, processes, currentFactory, s
       React.createElement("select", {value: currentFactory.factory_id, onChange: e => setCurrentFactory(FACTORIES.find(f=>f.factory_id===e.target.value))},
         FACTORIES.map(f => React.createElement("option", {key:f.factory_id, value:f.factory_id}, f.factory_name))),
       React.createElement("span", {className:"factory-badge"}, `${factoryProcesses.length}工程`)),
-    phase === "idle" ? renderIdle() : phase === "select_process" ? renderProcessSelect() : renderFeedback(),
-    phase === "idle" && React.createElement("div", {className:"sim-area"},
-      React.createElement("div", {className:"sim-label"}, "カメラが使えない場合はこちら（シミュレーション）"),
-      React.createElement("div", {className:"sim-buttons"},
-        employees.filter(e=>e.role==="worker").map(emp =>
-          React.createElement("button", {key:emp.employee_id,className:"sim-btn",onClick:()=>scanQR(emp)},
-            React.createElement("span", {className:"qr-mini"}),
-            emp.employee_name)))),
-    React.createElement("div", {className:"recent"},
-      React.createElement("div", {className:"recent-label"}, "直近の打刻（全工程）"),
-      recent.length === 0
-        ? React.createElement("div", {className:"recent-empty"}, "打刻履歴なし")
-        : recent.map(s => React.createElement("div", {key:s.stamp_id,className:"recent-item"},
-          React.createElement("span", {className:`badge ${s.stamp_type === "day_end" ? "end" : s.stamp_type}`},
-            s.stamp_type === "start" ? "開始" : s.stamp_type === "day_end" ? "業終" : "終了"),
-          React.createElement("span", {className:"name"}, s.employee_name),
-          React.createElement("span", {className:"wp"}, s.process_id === "day_end" ? "工場業務終了" : prName(s.process_id)),
-          React.createElement("span", {className:"time"}, fmt(s.stamp_time)))))
+    phase === "idle" ? React.createElement("div", {className:"stamp-landscape"},
+      React.createElement("div", {className:"camera-side"},
+        renderIdle(),
+        React.createElement("div", {className:"sim-area"},
+          React.createElement("div", {className:"sim-label"}, "カメラが使えない場合はこちら（シミュレーション）"),
+          React.createElement("div", {className:"sim-buttons"},
+            employees.filter(e=>e.role==="worker").map(emp =>
+              React.createElement("button", {key:emp.employee_id,className:"sim-btn",onClick:()=>scanQR(emp)},
+                React.createElement("span", {className:"qr-mini"}),
+                emp.employee_name))))),
+      React.createElement("div", {className:"recent-side"},
+        React.createElement("div", {className:"recent"},
+          React.createElement("div", {className:"recent-label"}, `直近の打刻（${currentFactory.factory_name}）`),
+          recent.length === 0
+            ? React.createElement("div", {className:"recent-empty"}, "打刻履歴なし")
+            : recent.map(s => React.createElement("div", {key:s.stamp_id,className:`recent-item${recentHighlight.has(s.stamp_id) ? " highlight" : ""}`},
+              React.createElement("span", {className:`badge ${s.stamp_type === "day_end" ? "end" : s.stamp_type}`},
+                s.stamp_type === "start" ? "開始" : s.stamp_type === "day_end" ? "業終" : "終了"),
+              React.createElement("span", {className:"name"}, s.employee_name),
+              React.createElement("span", {className:"wp"}, s.process_id === "day_end" ? "工場業務終了" : prName(s.process_id)),
+              React.createElement("span", {className:"date"}, s.stamp_time.slice(5,10).replace("-","/")),
+              React.createElement("span", {className:"time"}, fmt(s.stamp_time)))))))
+    : phase === "select_process" ? renderProcessSelect() : renderFeedback()
   );
 };
 
@@ -1075,10 +1191,12 @@ const App = () => {
   const [stamps, setStamps] = useState(() => loadStamps());
   const [tab, setTab] = useState("stamp");
   const [editing, setEditing] = useState(null);
-  const [currentFactory, setCurrentFactory] = useState(FACTORIES[0]);
+  const [currentFactory, setCurrentFactory] = useState(() => loadFactory());
 
   // stamps変更時にlocalStorageへ保存
   useEffect(() => { saveStamps(stamps); }, [stamps]);
+  // 工場変更時にlocalStorageへ保存
+  useEffect(() => { saveFactory(currentFactory); }, [currentFactory]);
 
   const tabs = [
     {id:"stamp",label:"打刻",icon:"\uD83D\uDCF7"},
